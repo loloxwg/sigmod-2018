@@ -1,5 +1,6 @@
 #include "operators.h"
-
+#include <iostream>
+#include <thread>
 #include <cassert>
 
 // Get materialized results
@@ -112,6 +113,43 @@ void Join::copy2Result(uint64_t left_id, uint64_t right_id) {
     ++result_size_;
 }
 
+
+void Join::probePhaseParallel(uint64_t start, uint64_t end, std::vector<std::vector<uint64_t>>& temp_results_thread, uint64_t *&right_key_column) {
+    for (uint64_t i = start; i != end; ++i) {
+        auto rightKey = right_key_column[i];
+        auto range = hash_table_.equal_range(rightKey);
+        temp_results_thread.resize(copy_left_data_.size() + copy_right_data_.size());
+        for (auto iter = range.first; iter != range.second; ++iter) {
+            copy2ResultParallel(iter->second, i, temp_results_thread);
+        }
+    }
+}
+
+void Join::copy2ResultParallel(uint64_t left_id, uint64_t right_id, std::vector<std::vector<uint64_t>>& tmp_results_thread) {
+    unsigned rel_col_id = 0;
+    for (unsigned cId = 0; cId < copy_left_data_.size(); ++cId)
+        tmp_results_thread[rel_col_id++].push_back(copy_left_data_[cId][left_id]);
+
+    for (unsigned cId = 0; cId < copy_right_data_.size(); ++cId)
+        tmp_results_thread[rel_col_id++].push_back(copy_right_data_[cId][right_id]);
+
+    // Remove result_size_ update from here as result size will be updated after merging all thread results
+}
+
+void Join::mergeResults(std::vector<std::vector<uint64_t>>& temp_results_thread) {
+    unsigned num_cols = temp_results_thread.size();
+    if (num_cols == 0) {
+        return;
+    }
+
+    // Insert data for each column
+    for (unsigned int i = 0; i < num_cols; ++i) {
+        tmp_results_[i].insert(tmp_results_[i].end(), temp_results_thread[i].begin(), temp_results_thread[i].end());
+    }
+    // Update result_size_ after merging all thread results
+    result_size_ = tmp_results_[0].size();
+}
+
 // Run
 void Join::run() {
     left_->require(p_info_.left);
@@ -151,13 +189,60 @@ void Join::run() {
         hash_table_.emplace(left_key_column[i], i);
     }
     // Probe phase
-    auto right_key_column = right_input_data[right_col_id];
-    for (uint64_t i = 0, limit = i + right_->result_size(); i != limit; ++i) {
-        auto rightKey = right_key_column[i];
-        auto range = hash_table_.equal_range(rightKey);
-        for (auto iter = range.first; iter != range.second; ++iter) {
-            copy2Result(iter->second, i);
-        }
+    uint64_t *&right_key_column = right_input_data[right_col_id];
+
+    /////////////////////////////////////////////////////////////////////////////
+//    for (uint64_t i = 0, limit = i + right_->result_size(); i != limit; ++i) {
+//        auto rightKey = right_key_column[i];
+//        auto range = hash_table_.equal_range(rightKey);
+//        for (auto iter = range.first; iter != range.second; ++iter) {
+//            /**
+//             *
+//             * */
+//            unsigned rel_col_id = 0;
+//            for (unsigned cId = 0; cId < copy_left_data_.size(); ++cId)
+//                tmp_results_[rel_col_id++].push_back(copy_left_data_[cId][iter->second]);
+//
+//                std::cout<<"rel_col_id: "<<rel_col_id<<std::endl;
+//
+//            for (unsigned cId = 0; cId < copy_right_data_.size(); ++cId)
+//                tmp_results_[rel_col_id++].push_back(copy_right_data_[cId][i]);
+//                std::cout<<"i            "<<i<<std::endl;
+//
+//            ++result_size_;
+//        }
+//    }
+    /////////////////////////////////////////////////////////////////////////////////////
+//
+//    for (const auto& row : tmp_results_) {
+//        for (const auto& item : row) {
+//            std::cout << item << ' ';
+//        }
+//        std::cout << '\n';  // new line for each row
+//    }
+
+
+//  New multi-threaded probe phase
+    const auto hardware_threads = std::thread::hardware_concurrency();
+    std::vector<std::thread> threads(hardware_threads);
+    std::vector<std::vector<std::vector<uint64_t>>> all_tmp_results(hardware_threads);
+    const auto chunk_size = right_->result_size() / hardware_threads;
+
+
+    for (uint64_t i = 0; i < hardware_threads; ++i) {
+        all_tmp_results[i].resize(copy_left_data_.size() + copy_right_data_.size());
+        uint64_t start = i * chunk_size;
+        uint64_t end = (i+1) == hardware_threads ? right_->result_size() : (i+1) * chunk_size;
+        threads[i] = std::thread([this, start, end, &all_tmp_results, &right_key_column, i]() {
+            probePhaseParallel(start, end, all_tmp_results[i], right_key_column);
+        });
+    }
+
+    for (auto &thread : threads) {
+        thread.join();
+    }
+    for (auto &tmp_results : all_tmp_results) {
+        mergeResults(tmp_results);  // Merge thread's results into main result
     }
 }
 

@@ -132,11 +132,15 @@ private:
     /// The input data that has to be copied
     std::vector<uint64_t *> copy_left_data_, copy_right_data_;
 
+    void probePhaseParallel(uint64_t start, uint64_t end, std::vector<std::vector<uint64_t>>& temp_results_thread, uint64_t *&right_key_column);
+    void copy2ResultParallel(uint64_t left_id, uint64_t right_id, std::vector<std::vector<uint64_t>>& tmp_results_thread) ;
+
 private:
     /// Copy tuple to result
     void copy2Result(uint64_t left_id, uint64_t right_id);
     /// Create mapping for bindings
     void createMappingForBindings();
+    void mergeResults(std::vector<std::vector<uint64_t>> &temp_results_thread);
 
 public:
     /// The constructor

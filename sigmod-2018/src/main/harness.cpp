@@ -283,11 +283,11 @@ int main(int argc, char *argv[]) {
                           << ", actual: " << val << std::endl;
                 ++failure_cnt;
             }
-            /*if (matched)
-            {
-                std::cout << std::endl << val << std::endl
-                          << std::endl << result_batches[batch][i];
-            }*/
+//            if (matched)
+//            {
+//                std::cout << std::endl << val << std::endl
+//                          << std::endl << result_batches[batch][i];
+//            }
             ++query_no;
         }
     }
@@ -301,6 +301,7 @@ int main(int argc, char *argv[]) {
             static_cast<double>(end.tv_sec - start.tv_sec)
             + (end.tv_usec - start.tv_usec) / 1000000.0;
         std::cout << (long) (elapsed_sec * 1000) << std::endl;
+        std::cout<<"ms"<<std::endl;
         return EXIT_SUCCESS;
     }
 
