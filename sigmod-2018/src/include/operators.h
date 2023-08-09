@@ -8,6 +8,7 @@
 #include <utility>
 #include <vector>
 #include <set>
+#include <mutex>
 
 #include "relation.h"
 #include "parser.h"
@@ -131,6 +132,8 @@ private:
     std::vector<uint64_t *> left_input_data_, right_input_data_;
     /// The input data that has to be copied
     std::vector<uint64_t *> copy_left_data_, copy_right_data_;
+    /// Add a mutex for mergeResults function
+    std::mutex merge_mutex_;
 
     void probePhaseParallel(uint64_t start, uint64_t end, std::vector<std::vector<uint64_t>>& temp_results_thread, uint64_t *&right_key_column);
     void copy2ResultParallel(uint64_t left_id, uint64_t right_id, std::vector<std::vector<uint64_t>>& tmp_results_thread) ;

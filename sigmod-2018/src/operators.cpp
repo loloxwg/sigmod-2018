@@ -137,6 +137,7 @@ void Join::copy2ResultParallel(uint64_t left_id, uint64_t right_id, std::vector<
 }
 
 void Join::mergeResults(std::vector<std::vector<uint64_t>>& temp_results_thread) {
+    std::lock_guard<std::mutex> lock(merge_mutex_);
     unsigned num_cols = temp_results_thread.size();
     if (num_cols == 0) {
         return;
@@ -238,11 +239,10 @@ void Join::run() {
         });
     }
 
-    for (auto &thread : threads) {
-        thread.join();
-    }
-    for (auto &tmp_results : all_tmp_results) {
-        mergeResults(tmp_results);  // Merge thread's results into main result
+    // Join threads and merge results
+    for (uint64_t thread_index = 0; thread_index < threads.size(); ++thread_index) {
+        threads[thread_index].join();
+        mergeResults(all_tmp_results[thread_index]);
     }
 }
 
