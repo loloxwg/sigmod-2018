@@ -155,6 +155,8 @@ public:
     bool require(SelectInfo info) override;
     /// Run
     void run() override;
+
+    void runLeft();
 };
 
 class SelfJoin : public Operator {
@@ -171,6 +173,8 @@ private:
     /// The input data that has to be copied
     std::vector<uint64_t *> copy_data_;
 
+    std::mutex merge_mutex_;
+
 private:
     /// Copy tuple to result
     void copy2Result(uint64_t id);
@@ -183,6 +187,8 @@ public:
     bool require(SelectInfo info) override;
     /// Run
     void run() override;
+
+    void runThingInput();
 };
 
 class Checksum : public Operator {
