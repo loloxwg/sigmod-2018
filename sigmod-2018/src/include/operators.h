@@ -35,6 +35,8 @@ protected:
     /// The result size
     uint64_t result_size_ = 0;
 
+    std::unordered_map<SelectInfo, uint64_t> select_to_result_col_id_sum_;
+
 public:
     /// The destructor
     virtual ~Operator() = default;;

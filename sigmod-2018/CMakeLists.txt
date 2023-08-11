@@ -6,6 +6,13 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 add_compile_options(-Wno-deprecated-copy)
 
+# Find OpenMP
+find_package(OpenMP)
+if(OpenMP_CXX_FOUND)
+	set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${OpenMP_CXX_FLAGS}")
+endif()
+
+
 # set(CMAKE_C_COMPILER /usr/local/bin/gcc)
 # set(CMAKE_CXX_COMPILER /usr/local/bin/g++)
 
@@ -28,13 +35,13 @@ list(REMOVE_ITEM PROJECT_SRCS ${PROJECT_SOURCE_DIR}/src/main/query2SQL.cpp)
 
 add_library(database ${PROJECT_SRCS})
 target_include_directories(database PUBLIC
-    $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/src/include>
-    $<INSTALL_INTERFACE:include>
-    PRIVATE src)
+		$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/src/include>
+		$<INSTALL_INTERFACE:include>
+		PRIVATE src)
 
 OPTION(FORCE_TESTS "Build tests, regardless of build type." ON)
 if (CMAKE_BUILD_TYPE MATCHES "[Dd][Ee][Bb][Uu][Gg]" OR FORCE_TESTS)
-    add_subdirectory(test)
+	add_subdirectory(test)
 endif()
 
 add_executable(driver src/main/main.cpp)
@@ -48,5 +55,5 @@ target_link_libraries(query2SQL database)
 add_executable(harness src/main/harness.cpp)
 
 ADD_CUSTOM_TARGET(link_target ALL
-  COMMAND ${CMAKE_COMMAND} -E create_symlink ${PROJECT_SOURCE_DIR}/workloads
-  ${CMAKE_CURRENT_BINARY_DIR}/workloads)
+		COMMAND ${CMAKE_COMMAND} -E create_symlink ${PROJECT_SOURCE_DIR}/workloads
+		${CMAKE_CURRENT_BINARY_DIR}/workloads)

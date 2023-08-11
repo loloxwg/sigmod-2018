@@ -88,6 +88,30 @@ void Relation::loadRelation(const char *file_name) {
         this->columns_.push_back(reinterpret_cast<uint64_t *>(addr));
         addr += size_ * sizeof(uint64_t);
     }
+
+    auto size = this->size_;
+    // Assuming columns() returns a vector-like data structure
+    for (int j = 0; j < numColumns; ++j) {
+        // zone map sum
+        auto sum = 0;
+        // zone map max
+        auto max = 0;
+        // zone map min
+        auto min = INT64_MAX;
+
+        for (int i = 0; i < size; ++i) {
+            sum += this->columns_[j][i];
+            if (this->columns_[j][i] > max) {
+                max = this->columns_[j][i];
+            }
+            if (this->columns_[j][i] < min) {
+                min = this->columns_[j][i];
+            }
+        }
+        this->zone_map_sum_.emplace_back(sum);
+        this->zone_map_max_.emplace_back(max);
+        this->zone_map_min_.emplace_back(min);
+    }
 }
 
 // Constructor that loads relation_ from disk
@@ -101,5 +125,21 @@ Relation::~Relation() {
         for (auto c : columns_)
             delete[] c;
     }
+}
+
+uint64_t Relation::column_size() const {
+    return size_;
+}
+
+uint64_t Relation::getSum(uint64_t index) const {
+    return zone_map_sum_[index];
+}
+
+uint64_t Relation::getMax(uint64_t index) const {
+    return zone_map_max_[index];
+}
+
+uint64_t Relation::getMin(uint64_t index) const {
+    return zone_map_min_[index];
 }
 

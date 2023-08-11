@@ -6,7 +6,7 @@
 // Get materialized results
 std::vector<uint64_t *> Operator::getResults() {
     std::vector<uint64_t *> result_vector;
-    for (auto &c : tmp_results_) {
+    for (auto &c: tmp_results_) {
         result_vector.emplace_back(c.data());
     }
     return result_vector;
@@ -19,6 +19,8 @@ bool Scan::require(SelectInfo info) {
     assert(info.col_id < relation_.columns().size());
     result_columns_.emplace_back(relation_.columns()[info.col_id]);
     select_to_result_col_id_[info] = result_columns_.size() - 1;
+    auto sum  = relation_.getSum(info.col_id);
+    select_to_result_col_id_sum_[info] = sum;
     return true;
 }
 
@@ -39,10 +41,13 @@ bool FilterScan::require(SelectInfo info) {
         return false;
     assert(info.col_id < relation_.columns().size());
     // Use the insert method to both check and insert values
-    auto[it, inserted] = select_to_result_col_id_.insert({info, tmp_results_.size()});
+    auto [it, inserted] = select_to_result_col_id_.insert({info, tmp_results_.size()});
     if (inserted) {
         input_data_.emplace_back(relation_.columns()[info.col_id]);
         tmp_results_.emplace_back();
+
+        auto sum  = relation_.getSum(info.col_id);
+        select_to_result_col_id_sum_[info] = sum;
     }
     return true;
 }
@@ -58,13 +63,16 @@ void FilterScan::copy2Result(uint64_t id) {
 bool FilterScan::applyFilter(uint64_t i, FilterInfo &f) {
     auto compare_col = relation_.columns()[f.filter_column.col_id];
     auto constant = f.constant;
+    if (f.constant>relation_.getMax(f.filter_column.col_id) || f.constant<relation_.getMin(f.filter_column.col_id)){
+        return false;
+    }
     switch (f.comparison) {
-    case FilterInfo::Comparison::Equal:
-        return compare_col[i] == constant;
-    case FilterInfo::Comparison::Greater:
-        return compare_col[i] > constant;
-    case FilterInfo::Comparison::Less:
-        return compare_col[i] < constant;
+        case FilterInfo::Comparison::Equal:
+            return compare_col[i] == constant;
+        case FilterInfo::Comparison::Greater:
+            return compare_col[i] > constant;
+        case FilterInfo::Comparison::Less:
+            return compare_col[i] < constant;
     };
     return false;
 }
@@ -73,7 +81,7 @@ bool FilterScan::applyFilter(uint64_t i, FilterInfo &f) {
 void FilterScan::run() {
     for (uint64_t i = 0; i < relation_.size(); ++i) {
         bool pass = true;
-        for (auto &f : filters_) {
+        for (auto &f: filters_) {
             pass &= applyFilter(i, f);
         }
         if (pass)
@@ -113,7 +121,8 @@ void Join::copy2Result(uint64_t left_id, uint64_t right_id) {
 }
 
 
-void Join::probePhaseParallel(uint64_t start, uint64_t end, std::vector<std::vector<uint64_t>>& temp_results_thread, uint64_t *&right_key_column) {
+void Join::probePhaseParallel(uint64_t start, uint64_t end, std::vector<std::vector<uint64_t>> &temp_results_thread,
+                              uint64_t *&right_key_column) {
     for (uint64_t i = start; i != end; ++i) {
         auto rightKey = right_key_column[i];
         auto range = hash_table_.equal_range(rightKey);
@@ -124,7 +133,8 @@ void Join::probePhaseParallel(uint64_t start, uint64_t end, std::vector<std::vec
     }
 }
 
-void Join::copy2ResultParallel(uint64_t left_id, uint64_t right_id, std::vector<std::vector<uint64_t>>& tmp_results_thread) {
+void
+Join::copy2ResultParallel(uint64_t left_id, uint64_t right_id, std::vector<std::vector<uint64_t>> &tmp_results_thread) {
     unsigned rel_col_id = 0;
     for (unsigned cId = 0; cId < copy_left_data_.size(); ++cId)
         tmp_results_thread[rel_col_id++].emplace_back(copy_left_data_[cId][left_id]);
@@ -135,7 +145,7 @@ void Join::copy2ResultParallel(uint64_t left_id, uint64_t right_id, std::vector<
     // Remove result_size_ update from here as result size will be updated after merging all thread results
 }
 
-void Join::mergeResults(std::vector<std::vector<uint64_t>>& temp_results_thread) {
+void Join::mergeResults(std::vector<std::vector<uint64_t>> &temp_results_thread) {
     std::lock_guard<std::mutex> lock(merge_mutex_);
     unsigned num_cols = temp_results_thread.size();
     if (num_cols == 0) {
@@ -150,10 +160,11 @@ void Join::mergeResults(std::vector<std::vector<uint64_t>>& temp_results_thread)
     result_size_ = tmp_results_[0].size();
 }
 
-void Join::runLeft(){
+void Join::runLeft() {
     left_->require(p_info_.left);
     left_->run();
 }
+
 // Run
 void Join::run() {
     std::thread tLeft([this]() -> void{runLeft();});
@@ -174,11 +185,11 @@ void Join::run() {
 
     // Resolve the input_ columns_
     unsigned res_col_id = 0;
-    for (auto &info : requested_columns_left_) {
+    for (auto &info: requested_columns_left_) {
         copy_left_data_.emplace_back(left_input_data[left_->resolve(info)]);
         select_to_result_col_id_[info] = res_col_id++;
     }
-    for (auto &info : requested_columns_right_) {
+    for (auto &info: requested_columns_right_) {
         copy_right_data_.emplace_back(right_input_data[right_->resolve(info)]);
         select_to_result_col_id_[info] = res_col_id++;
     }
@@ -196,7 +207,7 @@ void Join::run() {
     uint64_t *&right_key_column = right_input_data[right_col_id];
 
     /////////////////////////////////////////////////////////////////////////////
-    if (right_->result_size()< std::thread::hardware_concurrency()){
+    if (right_->result_size() < std::thread::hardware_concurrency() * 1.5) {
 
         for (uint64_t i = 0, limit = i + right_->result_size(); i != limit; ++i) {
             auto rightKey = right_key_column[i];
@@ -206,10 +217,10 @@ void Join::run() {
                  *
                  * */
 
-                copy2Result(iter->second,i);
+                copy2Result(iter->second, i);
             }
         }
-    } else{
+    } else {
         /////////////////////////////////////////////////////////////////////////////////////
         // New multi-threaded probe phase
         const auto hardware_threads = std::thread::hardware_concurrency();
@@ -221,7 +232,7 @@ void Join::run() {
         for (uint64_t i = 0; i < hardware_threads; ++i) {
             all_tmp_results[i].resize(copy_left_data_.size() + copy_right_data_.size());
             uint64_t start = i * chunk_size;
-            uint64_t end = (i+1) == hardware_threads ? right_->result_size() : (i+1) * chunk_size;
+            uint64_t end = (i + 1) == hardware_threads ? right_->result_size() : (i + 1) * chunk_size;
             threads[i] = std::thread([this, start, end, &all_tmp_results, &right_key_column, i]() {
                 probePhaseParallel(start, end, all_tmp_results[i], right_key_column);
             });
@@ -263,7 +274,7 @@ bool SelfJoin::require(SelectInfo info) {
     return false;
 }
 
-std::unordered_map<uint64_t, std::vector<uint64_t>> buildIndex(uint64_t* col, uint64_t size) {
+std::unordered_map<uint64_t, std::vector<uint64_t>> buildIndex(uint64_t *col, uint64_t size) {
     std::unordered_map<uint64_t, std::vector<uint64_t>> index;
     for (uint64_t i = 0; i < size; ++i) {
         index[col[i]].emplace_back(i);
@@ -271,12 +282,13 @@ std::unordered_map<uint64_t, std::vector<uint64_t>> buildIndex(uint64_t* col, ui
     return index;
 }
 
-void SelfJoin::runThingInput(){
+void SelfJoin::runThingInput() {
     input_->require(p_info_.left);
     input_->require(p_info_.right);
     input_->run();
     input_data_ = input_->getResults();
 }
+
 // Run
 void SelfJoin::run() {
     input_->require(p_info_.left);
@@ -284,7 +296,7 @@ void SelfJoin::run() {
     input_->run();
     input_data_ = input_->getResults();
 
-    for (auto &iu : required_IUs_) {
+    for (auto &iu: required_IUs_) {
         auto id = input_->resolve(iu);
         copy_data_.emplace_back(input_data_[id]);
         select_to_result_col_id_.emplace(iu, copy_data_.size() - 1);
@@ -295,44 +307,41 @@ void SelfJoin::run() {
 
     auto left_col = input_data_[left_col_id];
     auto right_col = input_data_[right_col_id];
-    auto threads = std::vector<std::thread>();
-    auto num_threads = std::thread::hardware_concurrency();
-
-    for ( uint64_t i = 0; i < num_threads; ++i ) {
-        threads.emplace_back([=]() {
-            for ( uint64_t j = i; j < input_->result_size(); j += num_threads ) {
-                if ( left_col[j] == right_col[j] ) {
-                    std::lock_guard<std::mutex> lock(merge_mutex_);
-                    copy2Result(j);
-                }
-            }
-        });
-    }
-    for ( auto& t: threads ) {
-        if ( t.joinable() ) {
-            t.join();
-        }
+    for (uint64_t i = 0; i < input_->result_size(); ++i) {
+        if (left_col[i] == right_col[i])
+            copy2Result(i);
     }
 }
 
 // Run
 void Checksum::run() {
-    for (auto &sInfo : col_info_) {
+    for (auto &sInfo: col_info_) {
         input_->require(sInfo);
     }
+
     input_->run();
     auto results = input_->getResults();
+    result_size_ = input_->result_size();
 
-    for (auto &sInfo : col_info_) {
-        auto col_id = input_->resolve(sInfo);
-        auto result_col = results[col_id];
-        uint64_t sum = 0;
-        result_size_ = input_->result_size();
-        for (auto iter = result_col, limit = iter + input_->result_size();
-                iter != limit;
-                ++iter)
-            sum += *iter;
-        check_sums_.emplace_back(sum);
+    check_sums_.reserve(col_info_.size());
+
+    for (auto &sInfo: col_info_) {
+
+        auto it = select_to_result_col_id_sum_.find(sInfo);
+        if (it != select_to_result_col_id_sum_.end()) {
+            uint64_t sum = it->second;
+            check_sums_.emplace_back(sum);
+        } else {
+            // Handle the case where the sum was not found in the map.
+            // For example, you could report an error or use a default value.
+            uint64_t sum = 0;
+            auto col_id = input_->resolve(sInfo);
+            auto result_col = results[col_id];
+            for (auto iter = result_col, limit = iter + result_size_; iter != limit; ++iter) {
+                sum += *iter;
+            }
+            check_sums_.emplace_back(sum);
+        }
     }
 }
 
