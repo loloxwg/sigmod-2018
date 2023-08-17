@@ -306,19 +306,26 @@ void SelfJoin::run() {
         select_to_result_col_id_.emplace(iu, copy_data_.size() - 1);
     }
 
-    auto num_threads = std::thread::hardware_concurrency();
+    auto left_col_id = input_->resolve(p_info_.left);
+    auto right_col_id = input_->resolve(p_info_.right);
 
-    if (input_->result_size() < std::thread::hardware_concurrency() * 2) {
-
-        auto left_col_id = input_->resolve(p_info_.left);
-        auto right_col_id = input_->resolve(p_info_.right);
-
+    auto left_col = input_data_[left_col_id];
+    auto right_col = input_data_[right_col_id];
+    for (uint64_t i = 0; i < input_->result_size(); ++i) {
+        if (left_col[i] == right_col[i])
+            copy2Result(i);
+    }
+    /**
+     *
+     *
+     if (input_->result_size() < num_threads * 2) {
         auto left_col = input_data_[left_col_id];
         auto right_col = input_data_[right_col_id];
         for (uint64_t i = 0; i < input_->result_size(); ++i) {
             if (left_col[i] == right_col[i])
                 copy2Result(i);
         }
+
     } else {
         std::vector<std::thread> threads(num_threads);
 
@@ -342,7 +349,7 @@ void SelfJoin::run() {
         for (auto &thread: threads) {
             thread.join();
         }
-    }
+     */
 }
 
 // Run
