@@ -2,6 +2,8 @@
 #include <iostream>
 #include <thread>
 #include <cassert>
+#include "threadpool.h"
+#include <omp.h>
 
 // Get materialized results
 std::vector<uint64_t *> Operator::getResults() {
@@ -19,7 +21,7 @@ bool Scan::require(SelectInfo info) {
     assert(info.col_id < relation_.columns().size());
     result_columns_.emplace_back(relation_.columns()[info.col_id]);
     select_to_result_col_id_[info] = result_columns_.size() - 1;
-    auto sum  = relation_.getSum(info.col_id);
+    auto sum = relation_.getSum(info.col_id);
     select_to_result_col_id_sum_[info] = sum;
     return true;
 }
@@ -45,9 +47,6 @@ bool FilterScan::require(SelectInfo info) {
     if (inserted) {
         input_data_.emplace_back(relation_.columns()[info.col_id]);
         tmp_results_.emplace_back();
-
-        auto sum  = relation_.getSum(info.col_id);
-        select_to_result_col_id_sum_[info] = sum;
     }
     return true;
 }
@@ -63,9 +62,6 @@ void FilterScan::copy2Result(uint64_t id) {
 bool FilterScan::applyFilter(uint64_t i, FilterInfo &f) {
     auto compare_col = relation_.columns()[f.filter_column.col_id];
     auto constant = f.constant;
-    if (f.constant>relation_.getMax(f.filter_column.col_id) || f.constant<relation_.getMin(f.filter_column.col_id)){
-        return false;
-    }
     switch (f.comparison) {
         case FilterInfo::Comparison::Equal:
             return compare_col[i] == constant;
@@ -82,7 +78,12 @@ void FilterScan::run() {
     for (uint64_t i = 0; i < relation_.size(); ++i) {
         bool pass = true;
         for (auto &f: filters_) {
-            pass &= applyFilter(i, f);
+            if (f.constant > relation_.getMax(f.filter_column.col_id) ||
+                f.constant < relation_.getMin(f.filter_column.col_id)) {
+                continue;
+            } else {
+                pass &= applyFilter(i, f);
+            }
         }
         if (pass)
             copy2Result(i);
@@ -122,7 +123,7 @@ void Join::copy2Result(uint64_t left_id, uint64_t right_id) {
 
 
 void Join::probePhaseParallel(uint64_t start, uint64_t end, std::vector<std::vector<uint64_t>> &temp_results_thread,
-                              uint64_t *&right_key_column) {
+                              const uint64_t *right_key_column) {
     for (uint64_t i = start; i != end; ++i) {
         auto rightKey = right_key_column[i];
         auto range = hash_table_.equal_range(rightKey);
@@ -146,17 +147,18 @@ Join::copy2ResultParallel(uint64_t left_id, uint64_t right_id, std::vector<std::
 }
 
 void Join::mergeResults(std::vector<std::vector<uint64_t>> &temp_results_thread) {
-    std::lock_guard<std::mutex> lock(merge_mutex_);
+
     unsigned num_cols = temp_results_thread.size();
     if (num_cols == 0) {
         return;
     }
 
+   // std::lock_guard<std::mutex> lock(merge_mutex_);
     // Insert data for each column
     for (unsigned int i = 0; i < num_cols; ++i) {
         tmp_results_[i].insert(tmp_results_[i].end(), temp_results_thread[i].begin(), temp_results_thread[i].end());
     }
-    // Update result_size_ after merging all thread results
+    // Update result_size_ after merging  thread results
     result_size_ = tmp_results_[0].size();
 }
 
@@ -167,7 +169,7 @@ void Join::runLeft() {
 
 // Run
 void Join::run() {
-    std::thread tLeft([this]() -> void{runLeft();});
+    std::thread tLeft([this]() -> void { runLeft(); });
     right_->require(p_info_.right);
     right_->run();
     tLeft.join();
@@ -204,10 +206,10 @@ void Join::run() {
         hash_table_.emplace(left_key_column[i], i);
     }
     // Probe phase
-    uint64_t *&right_key_column = right_input_data[right_col_id];
+    auto right_key_column = right_input_data[right_col_id];
 
     /////////////////////////////////////////////////////////////////////////////
-    if (right_->result_size() < std::thread::hardware_concurrency() * 1.5) {
+    if (right_->result_size() < std::thread::hardware_concurrency() * 2.0) {
 
         for (uint64_t i = 0, limit = i + right_->result_size(); i != limit; ++i) {
             auto rightKey = right_key_column[i];
@@ -244,15 +246,6 @@ void Join::run() {
             mergeResults(all_tmp_results[thread_index]);
         }
     }
-
-//
-//    for (const auto& row : tmp_results_) {
-//        for (const auto& item : row) {
-//            std::cout << item << ' ';
-//        }
-//        std::cout << '\n';  // new line for each row
-//    }
-
 }
 
 // Copy to result
@@ -326,21 +319,26 @@ void Checksum::run() {
     check_sums_.reserve(col_info_.size());
 
     for (auto &sInfo: col_info_) {
-
-        auto it = select_to_result_col_id_sum_.find(sInfo);
-        if (it != select_to_result_col_id_sum_.end()) {
-            uint64_t sum = it->second;
-            check_sums_.emplace_back(sum);
+        if (result_size_ == 0) {
+            check_sums_.emplace_back();
+            continue;
         } else {
-            // Handle the case where the sum was not found in the map.
-            // For example, you could report an error or use a default value.
-            uint64_t sum = 0;
-            auto col_id = input_->resolve(sInfo);
-            auto result_col = results[col_id];
-            for (auto iter = result_col, limit = iter + result_size_; iter != limit; ++iter) {
-                sum += *iter;
+            auto it = select_to_result_col_id_sum_.find(sInfo);
+            if (it != select_to_result_col_id_sum_.end()) {
+                uint64_t sum = it->second;
+                check_sums_.emplace_back(sum);
+            } else {
+                // Handle the case where the sum was not found in the map.
+                // For example, you could report an error or use a default value.
+                uint64_t sum = 0;
+                auto col_id = input_->resolve(sInfo);
+                auto result_col = results[col_id];
+                #pragma omp simd
+                for (auto iter = result_col; iter < (result_col + result_size_); ++iter) {
+                    sum += *iter;
+                }
+                check_sums_.emplace_back(sum);
             }
-            check_sums_.emplace_back(sum);
         }
     }
 }

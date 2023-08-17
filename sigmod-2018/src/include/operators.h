@@ -137,7 +137,7 @@ private:
     /// Add a mutex for mergeResults function
     std::mutex merge_mutex_;
 
-    void probePhaseParallel(uint64_t start, uint64_t end, std::vector<std::vector<uint64_t>>& temp_results_thread, uint64_t *&right_key_column);
+    void probePhaseParallel(uint64_t start, uint64_t end, std::vector<std::vector<uint64_t>>& temp_results_thread, const uint64_t *right_key_column);
     void copy2ResultParallel(uint64_t left_id, uint64_t right_id, std::vector<std::vector<uint64_t>>& tmp_results_thread) ;
 
 private:
