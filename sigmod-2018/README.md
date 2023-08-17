@@ -1,226 +1,243 @@
-# 6.830 Programming Competition 2021
+# 6.830
 
-## Task Details
+# 1. INTRODUCTION
 
-The task is to evaluate batches of join queries on a set of pre-defined
-relations. Each join query specifies a set of relations, (equality) join
-predicates, and selections (aggregations). The challenge is to execute
-the queries as fast as possible.
+A few constraints given for the environment were as follows (run on an laptop):
 
-Input to your program will be provided on the standard input, and the
-output must appear on the standard output.
+| Processor | i5-11300H  |
+| --- | --- |
+| Conﬁguration | 4 cores / 8 hyperthreads |
+| Main memory | 16 GB RAM |
+| OS | Ubuntu 22.04 |
+| Dataset | https://db.in.tum.de/sigmod18contest/public.tar.gz |
 
-## Testing Protocol
+# 2. OVERALL ARCHITECTURE FOR OPTIMIZATIONS
 
-Our test harness will first feed the set of relations to your program's
-standard input. That means, your program will receive multiple lines
-(separated by the new line character '\n') where each one contains a
-string which represents the file name of the given relation. The relation
-files are already in a binary format and thus do not require parsing.
-All fields are unsigned 64 bit integers.
-Our starter package already contains sample code that mmaps() a
-relations into main memory.
-The binary format of a relation consists of
-a header and a data section. The header contains the number of tuples
-and the number of columns. The data section follows the header and stores
-all tuples using a column store. All of the values of a column
-are stored sequentially, followed by the values of the next column,
-and so on. The overall binary format is as follows (T0C0 stands for
-tuple 0 of column 0; pipe symbol '|' is not part of the binary format):
+- join multithreading
+    - probe HT
+    - merge temp result
+- single-threaded policy selection
+- zone map sum
+- predicate ordering
+- simd sum
+- self join multithreading
+- other
 
-```
-uint64_t numTuples|uint64_t numColumns|uint64_t T0C0|uint64_t T1C0|..|uint64_t TnC0|uint64_t T0C1|..|uint64_t TnC1|..|uint64_t TnCm
-```
+# 3. SPECIFIC OPTIMIZATIONS AND THEIR EFFECTIVENESS
 
-After sending the set of relations, our test harness will send a line
-containing the string "Done".
+## 3.1 JION multithreaded
 
-Next, our test harness will wait for **60s** until it starts sending
-queries. This gives you time to prepare for the workload, e.g., 
-collecting statistics, creating indexes, etc. The test harness sends
-the workload in batches:
-A workload batch contains a set of join queries (each line represents a
-query). A join query consists of three consecutive parts (separated
-by the pipe symbol '|'):
+A large bottleneck in the base code came from doing joins between two different tables. As a result, I spent a large majority of our time trying to optimize our join algorithm.
 
-- **Relations**: A list of relations that will be joined. We will pass
-the ids of the relation here separated by spaces (' '). The relation ids
-are implicitly mapped to the relations by the order the relations were
-passed in the first phase. For instance, id 0 refers to the first relation.
+In the base code, the join is implemented in Join::run() using a rather simple, serial algorithm. First, a hash table is built on the smaller table, and then the larger table is scanned, probing the hash table during the second scan.
 
-- **Predicates**: Each predicate is separated by a '&'. We have two types
-of predicates: filter predicates and join predicates. Filter predicates are
-of the form: filter column + comparison type (greater '>' less '<'
-equal '=') + integer constant. Join predicates specify on which columns the
-relations should be joined. A join predicate is composed out of two
-relation-column pairs connected with an equality ('=') operator. Here,
-a relation is identified by its offset in the list of relations to be
-joined (i.e., we implicitly bind the first relation of a join query to
-the identifier 0, the second one to 1, etc.).
+One of the ﬁrst optimizations,i made here was to use the std::thread interface to parallelize the probing of the hash table. Unfortunately, this added one small problem; in the serial version, all of the values of the join were being put into a single tmp results variable, but in order to avoid race conditions, I needed each thread to have its own version of the `temp_results_thread` variable. In order to do this, I gave each thread one array of temporary results in a larger array of all the temporary results (called `all_tmp_results` ). Then, after each thread ﬁnished with its own temp results, we merge all of those results into the main tmp results variable. This ﬁnal step is necessary, because later operators (higher up the query plan), require that the results are contiguous in memory (so they need to be merged eventually).
 
-- **Projections**: A list of columns that are needed to compute the final
-check sum that we use to verify that the join was done properly. Similar 
-to the join predicates, columns are denoted as relation-column pairs.
-Each selection is delimited by a space character (' ').
-
-Example:
-```
-0 2 4|0.1=1.2&1.0=2.1&0.1>3000|0.0 1.1
+```cpp
+// New multi-threaded probe phase
+const auto hardware_threads = std::thread::hardware_concurrency();
+std::vector<std::thread> threads(hardware_threads);
+std::vector<std::vector<std::vector<uint64_t>>> all_tmp_results(hardware_threads);
+const auto chunk_size = right_->result_size() / hardware_threads;
 ```
 
-Translation to SQL:
-```
-SELECT SUM("0".c0), SUM("1".c1)
-FROM r0 "0", r2 "1", r4 "2"
-WHERE 0.c1=1.c2 and 1.c0=2.c1 and 0.c1>3000
-```
+In order to distribute `right_->result_size()` equally among all threads (`hardware_threads`), `chunk_size` has been calculated, which represents the approximate amount of work (number of rows) processed by each thread. However, if `right_->result_size()`is not divisible by hardware_threads, there will be a subset of rows that are not assigned to any thread.
+To solve this problem, I set the termination condition (`end`) of the last thread to `right_->result_size()`, so that the last thread will process all remaining lines:
 
-The end of a batch is indicated by a line containing the character 'F'.
-Our test harness will then wait for the results to be written to your
-program's standard output. For each join query, your program is required
-to output a line containing the check sums of the individual projections
-separated by spaces (e.g., "42 4711"). If there is no qualifying tuple,
-each check sum should return "NULL" like in SQL. Once the results have
-been received, we will start delivering the next workload batch.
-
-For your check sums, use SUM aggregation.
-You do not have to worry about numeric overflows as long as you are using
-64 bit unsigned integers.
-
-Your solution will be evaluated for correctness and execution time.
-Execution time measurement starts immediately after the 60s waiting
-period. You are free to fully utilize the waiting period for any kind of
-pre-processing.
-
-All join graphs are connected. There are no cross products. Cyclic queries and
-self joins are possible. We will provide more constraints soon.
-
-## Starter code
-
-We provide a starter package in C++. It is in the format required for
-submission. It includes a query parser and a relation loader.
-It implements a basic query execution model featuring full
-materialization. It does not implement any query optimization. It only
-uses standard STL containers (like unordered_map) for the join
-processing. Its query processing capabilities are limited to the
-demands of this contest.
-
-DISCLAIMER: Although we have tested the package
-intensively, we cannot guarantee that it is free of bugs. Thus, we test
-your submissions against the results computed by a real DBMS.
-
-This project is only meant to give you a quick start into the project and
-to dig right into the fun (coding) part. It is not required to use the
-provided code. You can create a submittable submission.tar.gz file using
-the included package.sh script.
-
-For testing, we provide a small workload in the required format.
-We also provide CSV versions (.tbl files) of each relation + SQL
-files to load the relations into a DBMS and a file
-(small.work.sql) that contains SQL versions of all queries in
-small.work.
-
-To build the starter code base run the following commands:
-```
-mkdir build
-cd build
-cmake -DCMAKE_BUILD_TYPE=Release ..
-make -j4
+```cpp
+for (uint64_t i = 0; i < hardware_threads; ++i) {
+    all_tmp_results[i].resize(copy_left_data_.size() + copy_right_data_.size());
+    uint64_t start = i * chunk_size;
+    uint64_t end = (i+1) == hardware_threads ? right_->result_size() : (i+1) * chunk_size;
+    threads[i] = std::thread([this, start, end, &all_tmp_results, &right_key_column, i]() {
+        probePhaseParallel(start, end, all_tmp_results[i], right_key_column);
+    });
+}
 ```
 
-To build in debug mode run 
-`cmake -DCMAKE_BUILD_TYPE=Debug ..`
+In the above code, we define the start and end variables to represent the scope (number of rows) processed by each thread. For all threads except the last thread, their processing scope is`[i * chunk_size, (i + 1) * chunk_size)]`. For the last thread (i.e. i + 1 == hardware_threads), its processing scope is `[i * chunk_size, right_ - > result_size ()]`, which guarantees that all lines are processed.
 
-To not build the tests run 
-`cmake -DCMAKE_BUILD_TYPE=Release -DFORCE_TESTS=OFF ..`
+When trying to parallelize the `Join :: run ()` and `Join :: copy2Result` functions, the following points should be noted that data races may occur, which need to be solved by locking or other means:
 
-This creates the binaries `driver`, `harness`, and `query2SQL` in `build`
-directory and `tester` in `build/test` directory. `driver` is the binary that
-interacts with our test harness `harness` according to the protocol described
-above. You can use `query2SQL` to transform our query format to SQL.
+- `tmp_results_`: In `Join :: cop2ResultParallel`, we let each thread have its own container for temporarily storing results, rather than all threads writing to `tmp_results_`. This avoids data races that occur when writing data to tmp_results_. Nonetheless, subsequent `mergeResults` functions modify tmp_results_, so make sure that all threads have finished writing temporary results and start executing the `mergeResults` function before you start modifying `tmp_results_`.
+- `copy_left_data_ and copy_right_data_`: These two should be containers containing input data. Usually, read-only data does not need to be locked because no thread will modify the data. They only need to be locked if there is a thread trying to modify the data in your application and another thread is reading the data.
+- `result_size_`: In Join :: copy2ResultParallel, we do not update the `result_size_`, but result_size_ update after all threads have ended and all temporary results have been merged. If you update result_size_ in `Join :: copy2ResultParallel`, I must use mutual exclusion or atomic operations to ensure that no two threads modify result_size_ at the same time.
+- `hash_table_`: Reading `hash_table_` can be considered thread-safe while remaining unchanged (i.e. all elements have been inserted and no more elements need to be inserted or deleted). However, if the hash_table_ will be modified, then you need to lock it to prevent data races.
 
-`compile.sh` is the script we use for building your code in the testing environment. 
-It creates the binaries in `build/release` folder. It does not build unit tests
-as the testing environment does not have internet access. `run.sh` is the script
-the our test harness uses for running your executable. It expects the binaries
-in `build/release` folder. To test using our harness, first compile your code by
-running
+```cpp
+// Join threads and merge results
+        for (uint64_t thread_index = 0; thread_index < threads.size(); ++thread_index) {
+            threads[thread_index].join();
+            mergeResults(all_tmp_results[thread_index]);
+        }
 
-```
-bash compile.sh
-```
-
-To test the small workload using our test harness run
-
-```
-bash run_test_harness.sh workloads/small
+//        ThreadPool pool(hardware_threads);
+//        for (int i = 0; i < hardware_threads; ++i) {
+//            pool.enqueue([i, this, &all_tmp_results] {
+//                mergeResults(all_tmp_results[i]);
+//            });
+//        }
 ```
 
-To execute all unit tests run 
+At first, I used the thread pool to perform mergeResults operations after completing the probe, which would introduce a locking mechanism inside mergeResults, which has a certain overhead. The test result using public dataset is 47950 ms; but I use another strategy, after a single thread completes the probe directly merge it `temp_results_thread` to `tmp_results_` without locking, the test result using public dataset is 46195 ms, there is a gap of about 1000 ms, so the second strategy is retained at the end, and the efficiency of the thread pool may be more obvious in the larger test dataset.
 
+![Untitled](.asset/Untitled.png)
+
+![Untitled](.asset/Untitled%201.png)
+
+Improved 2.6 times after multi-threaded join optimization operations.
+
+## 3.2 single-threaded policy selection
+
+Upon doing both optimizations (of the probing and the merging of the temporary results), I notice that some of our test cases (particularly the smaller ones), got much slower. I hypothesized that this was due to the overhead of starting threads when the work is small (like when joining two small tables). To ﬁx this, I simply run the serial version of our code when the size of the tables is under a certain threshold,  Doing this allowed us to recover some of our speed on the small test case, but it did not give us a huge improvement on the public test.
+
+## 3.3 zone map sum
+
+Add several private member variables in class `Relation` to construct the zone map
+
+```cpp
+class Relation {
+private:
+    /// Owns memory (false if it was mmaped)
+    bool owns_memory_;
+    /// The number of tuples
+    uint64_t size_;
+    /// The join column containing the keys
+    std::vector<uint64_t *> columns_;
+    /// The zone map sum
+    std::vector<uint64_t> zone_map_sum_;
+    /// The zone map max
+    std::vector<uint64_t> zone_map_max_;
+    /// The zone map min
+    std::vector<uint64_t> zone_map_min_;
 ```
-./tester
+
+Fill each column of the zone map variable in the `Relation :: load Relation` function
+
+```cpp
+// Assuming columns() returns a vector-like data structure
+    for (int j = 0; j < numColumns; ++j) {
+        // zone map sum
+        auto sum = 0;
+        // zone map max
+        auto max = 0;
+        // zone map min
+        auto min = INT64_MAX;
+
+        for (int i = 0; i < size; ++i) {
+            sum += this->columns_[j][i];
+            if (this->columns_[j][i] > max) {
+                max = this->columns_[j][i];
+            }
+            if (this->columns_[j][i] < min) {
+                min = this->columns_[j][i];
+            }
+        }
+        this->zone_map_sum_.emplace_back(sum);
+        this->zone_map_max_.emplace_back(max);
+        this->zone_map_min_.emplace_back(min);
+    }
 ```
 
-To execute a specific unit test run 
+Fill `select_to_result_col_id_sum_` map in `Scan :: require`, and finally check sum can directly find the value of sum according to `SelectInfo` without going to the result set to calculate once.
 
+In database systems, Zone Map is a storage engine-level optimization technique that maintains some statistics such as maximum, minimum, quantity or sum for each data block (or data area). Let's discuss the advantages of using sum in Zone Map:
+Aggregate query optimization: For queries that need to return the sum of a column, if this sum can be obtained directly from the Zone Map, then we can avoid scanning the entire data block, especially when the data block is very large, which can greatly improve performance.
+Reduced I/O operations: Since Zone Maps are usually stored in memory, calculating sums through Zone Maps can reduce I/O operations that read data from disk.
+Improve data readability: If the business logic related to the sum of data in a region is complex, the sum can be easily obtained through the Zone Map without recalculation.
+In general, using sum in Zone Map can mainly provide performance optimization for SUM-type aggregated queries and queries that require the use of sum information. It improves query efficiency by reducing unnecessary data scanning.
+
+## 3.4 predicate ordering
+
+Predicate sorting plays an important role in database query optimization, and it can have a significant impact on query performance. In the code, the implementation of this sorting uses C++ std :: sort function. The principle is as follows:
+Predicate ordering optimizes a query based on an algorithm that orders different parts of the query (usually joins) in a certain order. For join operations, the purpose of sorting predicates is usually to minimize the amount of data processed in join operations.
+In the code, the predicate is first copied into the `predicates_copy` variable and then sorted by the `size` of the connection correlation. This is done by comparing the size of the left and right relationships. If the product of the left and right relationships is less than the product of the other pair of left and right relationships, then we consider the former to be less than the latter.
+After the sorting operation is completed, the join operation can be performed in the sorted order. This ensures that the connection operation processed first handles less data than the post-processing operation, thereby improving the query speed
+
+```cpp
+std::sort(predicates_copy.begin(), predicates_copy.end(), [this](const PredicateInfo& lhs, const PredicateInfo& rhs) {
+        auto firstL = getRelation(lhs.left.rel_id).size();
+        auto firstR = getRelation(lhs.right.rel_id).size();
+        auto secondL = getRelation(rhs.left.rel_id).size();
+        auto secondR = getRelation(rhs.right.rel_id).size();
+        auto firstSize = firstR*firstL;
+        auto secondSize = secondL*secondR;
+        return firstSize < secondSize;
+    });
 ```
-./tester --gtest_filter=<test_name>
+
+## 3.5 simd sum
+
+```cpp
+uint64_t sum = 0;
+auto col_id = input_->resolve(sInfo);
+auto result_col = results[col_id];
+#pragma omp simd
+for (auto iter = result_col; iter < (result_col + result_size_); ++iter) {
+     sum += *iter;
+}
+check_sums_.emplace_back(sum);
 ```
-For example,
+
+`#pragma omp simd` is used to speed up traversal and summation operations in result_col arrays. Since this summation operation is the same on every element in the array, it is ideal to use SIMD parallelization to improve performance.
+
+## 3.6other
+
+![Untitled](.asset/Untitled%202.png)
+
+`push_back` and `emplace_back` are two ways to add new elements to C++ STL containers such as std :: vector, std :: list, std :: deque, etc. The main difference between them is the way they handle data and objects.
+push_back function adds an element to the end of the container. This new element is created in main memory and then copied or moved into the container.
+On the other hand, emplace_back construct a new element and create it directly at the end of the container, avoiding the overhead of copy or move operations. This is achieved by constructing the object directly at the memory location using the provided parameters.
+
+# 4. Optimizations that didn’t work
+
+## 4.1 self join multithreading
+
+```cpp
+for (uint64_t i = 0; i < num_threads; ++i) {
+    uint64_t start = i * step + std::min(i, excess);
+    uint64_t end = start + step + (i < excess);
+     // partition the range [start, end)
+    auto part_left_col = left_col + start;
+    auto part_right_col = right_col + start;
+    threads[i] = std::thread(&SelfJoin::compareColumnsAndCopyRange, this, part_left_col, part_right_col, end- start, start);
+}
 ```
-./tester --gtest_filter=OperatorTest.ScanWithSelection
-```
 
-We encourage you to write your own tests to as you develop your code base.
-We have provided some examples using the
-[GoogleTest](https://github.com/google/googletest) framework in `test`
-folder.
+I employed the parallelization strategy from Self Join; that is, I partitioned the input, had each thread handle its partition separately, and then merged the results into the ﬁnal results in parallel. Doing this gave us about a -4.4% performance degradation.
 
-## Evaluation
+May be caused by too small dataset size and locking overhead.
 
-Our testing infrastructure will evaluate each submission by unpacking the
-submission file, compiling the submitted code (using your submitted
-compile.sh script), and then running a series of tests (using your
-submitted run.sh script). 
+## 4.2 Zone Map { min, max }
 
-Each test uses the test harness to supply an initial dataset and a
-workload to your submitted program. The total time for each test is
-limited to 4-5 minutes (different tests may have slightly different
-limits). The total per-test time includes the time to ingest the dataset
-and the time to process the workload. 
+Some situations encountered in optimization: there are also maximum and minimum values in zonemap. At first, it was planned to be used in FilterScan to filter predicate conditions that exceed the range, but after adding it, it did not improve but also reduced the speed because of more judgments. It may be a case where there is no such condition in the dataset.
 
-Submissions will be unpacked, compiled and tested in a network-isolated
-container. We will provide system specifications of the testing
-environment soon. 
+# 5. Results
 
-A submission is considered to be rankable if it correctly processes all
-of the test workloads within their time limits. As discussed in the
-testing protocol description, initial import of relations is not included
-in a submission's score. The leaderboard will show the best rankable
-submission for each team that has at least one such submission.
+## 5.1 public dataset
 
-We will use a larger dataset for evaluation. You can download it
-[here](http://dsg.csail.mit.edu/data/public.zip).
+- basic https://github.com/loloxwg/coding-tasks/commit/be58dc199e119ab1c8e1668a8946ab14a4921ead
 
+![Untitled](.asset/Untitled.png)
 
-## Submission
+- in the end  https://github.com/loloxwg/coding-tasks/commit/1fd0d8f6dbe309b39a6b8d8c42e740f5bc3a3d44
 
-Submit a single compressed tar file called submission.tar.gz and send it to yingfeng dot zhang AT gmail dot com.
-Submission files must be no larger than 5 MB - larger files will be
-rejected. 
+![Untitled](.asset/Untitled%203.png)
 
-You can use the starter package, which has the required format, as a
-starting point. You are also required to submit a **technical report** on your improvements in English in either markdown or PDF format.
+## 5.2 small dataset
 
-## Rules
+- basic https://github.com/loloxwg/coding-tasks/commit/be58dc199e119ab1c8e1668a8946ab14a4921ead
 
-- All submissions must consist only of code written by the team or open source
-licensed software (i.e., using an OSI-approved license). For source code from
-books or public articles, clear reference and attribution must be made.
-- Please keep your solution private and not make it publicly available.
+![Untitled](.asset/Untitled%204.png)
 
-## Acknowledgements
+- in the end https://github.com/loloxwg/coding-tasks/commit/1fd0d8f6dbe309b39a6b8d8c42e740f5bc3a3d44
 
-This contest is adapted from SIGMOD 2018 programming contest. The starter code
-is a modified version of the quick start package provided with the contest.
+![Untitled](.asset/Untitled%205.png)
+
+# References
+
+[Database programming competition](https://bentonw.com/post/2021-05-01-database-comp/)
+
+[ACM SIGMOD 2018 Programming Contest](https://db.in.tum.de/sigmod18contest/task.shtml)
+
+[](https://github.com/tabac/sigmod-contest-2018/blob/master/README.md)
