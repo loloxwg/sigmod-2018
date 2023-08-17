@@ -250,6 +250,8 @@ void Join::run() {
 
 // Copy to result
 void SelfJoin::copy2Result(uint64_t id) {
+    std::lock_guard<std::mutex> lock(merge_mutex_);
+    #pragma omp simd
     for (unsigned cId = 0; cId < copy_data_.size(); ++cId)
         tmp_results_[cId].emplace_back(copy_data_[cId][id]);
     ++result_size_;
@@ -282,6 +284,19 @@ void SelfJoin::runThingInput() {
     input_data_ = input_->getResults();
 }
 
+void SelfJoin::compareColumnsAndCopyRange(uint64_t start, uint64_t end) {
+    auto left_col_id = input_->resolve(p_info_.left);
+    auto right_col_id = input_->resolve(p_info_.right);
+
+    auto left_col = input_data_[left_col_id];
+    auto right_col = input_data_[right_col_id];
+    for (uint64_t i = start; i < end; ++i) {
+        if (left_col[i] == right_col[i])
+            copy2Result(i);
+    }
+}
+
+
 // Run
 void SelfJoin::run() {
     input_->require(p_info_.left);
@@ -295,14 +310,19 @@ void SelfJoin::run() {
         select_to_result_col_id_.emplace(iu, copy_data_.size() - 1);
     }
 
-    auto left_col_id = input_->resolve(p_info_.left);
-    auto right_col_id = input_->resolve(p_info_.right);
+    auto num_threads = std::thread::hardware_concurrency();
+    std::vector<std::thread> threads(num_threads);
 
-    auto left_col = input_data_[left_col_id];
-    auto right_col = input_data_[right_col_id];
-    for (uint64_t i = 0; i < input_->result_size(); ++i) {
-        if (left_col[i] == right_col[i])
-            copy2Result(i);
+    uint64_t step = input_->result_size() / num_threads;
+    uint64_t excess = input_->result_size() % num_threads;
+    for(uint64_t i = 0; i < num_threads; ++i){
+        uint64_t start = i * step + std::min(i, excess);
+        uint64_t end = start + step + (i < excess);
+        threads[i] = std::thread(&SelfJoin::compareColumnsAndCopyRange, this, start, end);
+    }
+
+    for(auto& thread : threads){
+        thread.join();
     }
 }
 

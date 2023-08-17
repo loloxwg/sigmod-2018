@@ -191,6 +191,8 @@ public:
     void run() override;
 
     void runThingInput();
+
+    void compareColumnsAndCopyRange(uint64_t start, uint64_t end);
 };
 
 class Checksum : public Operator {
