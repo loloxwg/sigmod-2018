@@ -192,7 +192,9 @@ public:
 
     void runThingInput();
 
-    void compareColumnsAndCopyRange(uint64_t start, uint64_t end);
+    void compareColumnsAndCopyRange(uint64_t * left_col, uint64_t * right_col,uint64_t size,uint64_t start);
+
+    void copy2ResultParallel(uint64_t id);
 };
 
 class Checksum : public Operator {

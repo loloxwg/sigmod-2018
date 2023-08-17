@@ -78,12 +78,7 @@ void FilterScan::run() {
     for (uint64_t i = 0; i < relation_.size(); ++i) {
         bool pass = true;
         for (auto &f: filters_) {
-            if (f.constant > relation_.getMax(f.filter_column.col_id) ||
-                f.constant < relation_.getMin(f.filter_column.col_id)) {
-                continue;
-            } else {
-                pass &= applyFilter(i, f);
-            }
+            pass &= applyFilter(i, f);
         }
         if (pass)
             copy2Result(i);
@@ -153,7 +148,7 @@ void Join::mergeResults(std::vector<std::vector<uint64_t>> &temp_results_thread)
         return;
     }
 
-   // std::lock_guard<std::mutex> lock(merge_mutex_);
+    // std::lock_guard<std::mutex> lock(merge_mutex_);
     // Insert data for each column
     for (unsigned int i = 0; i < num_cols; ++i) {
         tmp_results_[i].insert(tmp_results_[i].end(), temp_results_thread[i].begin(), temp_results_thread[i].end());
@@ -250,11 +245,16 @@ void Join::run() {
 
 // Copy to result
 void SelfJoin::copy2Result(uint64_t id) {
-    std::lock_guard<std::mutex> lock(merge_mutex_);
-    #pragma omp simd
     for (unsigned cId = 0; cId < copy_data_.size(); ++cId)
         tmp_results_[cId].emplace_back(copy_data_[cId][id]);
     ++result_size_;
+}
+
+void SelfJoin::copy2ResultParallel(uint64_t id) {
+    std::lock_guard<std::mutex> lock(merge_mutex_);
+    for (unsigned cId = 0; cId < copy_data_.size(); ++cId)
+        tmp_results_[cId].emplace_back(copy_data_[cId][id]);
+    result_size_ ++;
 }
 
 // Require a column and add it to results
@@ -284,15 +284,11 @@ void SelfJoin::runThingInput() {
     input_data_ = input_->getResults();
 }
 
-void SelfJoin::compareColumnsAndCopyRange(uint64_t start, uint64_t end) {
-    auto left_col_id = input_->resolve(p_info_.left);
-    auto right_col_id = input_->resolve(p_info_.right);
-
-    auto left_col = input_data_[left_col_id];
-    auto right_col = input_data_[right_col_id];
-    for (uint64_t i = start; i < end; ++i) {
+void SelfJoin::compareColumnsAndCopyRange(uint64_t *left_col, uint64_t *right_col, uint64_t size,uint64_t start) {
+    #pragma omp simd
+    for (uint64_t i = 0; i < size; ++i) {
         if (left_col[i] == right_col[i])
-            copy2Result(i);
+            copy2ResultParallel(i+start);
     }
 }
 
@@ -311,18 +307,41 @@ void SelfJoin::run() {
     }
 
     auto num_threads = std::thread::hardware_concurrency();
-    std::vector<std::thread> threads(num_threads);
 
-    uint64_t step = input_->result_size() / num_threads;
-    uint64_t excess = input_->result_size() % num_threads;
-    for(uint64_t i = 0; i < num_threads; ++i){
-        uint64_t start = i * step + std::min(i, excess);
-        uint64_t end = start + step + (i < excess);
-        threads[i] = std::thread(&SelfJoin::compareColumnsAndCopyRange, this, start, end);
-    }
+    if (input_->result_size() < std::thread::hardware_concurrency() * 2) {
 
-    for(auto& thread : threads){
-        thread.join();
+        auto left_col_id = input_->resolve(p_info_.left);
+        auto right_col_id = input_->resolve(p_info_.right);
+
+        auto left_col = input_data_[left_col_id];
+        auto right_col = input_data_[right_col_id];
+        for (uint64_t i = 0; i < input_->result_size(); ++i) {
+            if (left_col[i] == right_col[i])
+                copy2Result(i);
+        }
+    } else {
+        std::vector<std::thread> threads(num_threads);
+
+        uint64_t step = input_->result_size() / num_threads;
+        uint64_t excess = input_->result_size() % num_threads;
+
+        auto left_col_id = input_->resolve(p_info_.left);
+        auto right_col_id = input_->resolve(p_info_.right);
+        auto left_col = input_data_[left_col_id];
+        auto right_col = input_data_[right_col_id];
+
+        for (uint64_t i = 0; i < num_threads; ++i) {
+            uint64_t start = i * step + std::min(i, excess);
+            uint64_t end = start + step + (i < excess);
+            // partition the range [start, end)
+            auto part_left_col = left_col + start;
+            auto part_right_col = right_col + start;
+            threads[i] = std::thread(&SelfJoin::compareColumnsAndCopyRange, this, part_left_col, part_right_col, end- start, start);
+        }
+
+        for (auto &thread: threads) {
+            thread.join();
+        }
     }
 }
 
@@ -349,11 +368,10 @@ void Checksum::run() {
                 check_sums_.emplace_back(sum);
             } else {
                 // Handle the case where the sum was not found in the map.
-                // For example, you could report an error or use a default value.
                 uint64_t sum = 0;
                 auto col_id = input_->resolve(sInfo);
                 auto result_col = results[col_id];
-                #pragma omp simd
+#pragma omp simd
                 for (auto iter = result_col; iter < (result_col + result_size_); ++iter) {
                     sum += *iter;
                 }
