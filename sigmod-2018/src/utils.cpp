@@ -19,8 +19,8 @@ Relation Utils::createRelation(uint64_t size, uint64_t num_columns) {
         createColumn(columns, size);
     }
     std::vector<uint64_t> zone_map_sum;
-    std::vector<uint64_t> zone_map_max;
-    std::vector<uint64_t> zone_map_min;
+    //std::vector<uint64_t> zone_map_max;
+    //std::vector<uint64_t> zone_map_min;
 
     for (unsigned j = 0; j < num_columns; ++j) {
         auto max = 0;
@@ -28,19 +28,19 @@ Relation Utils::createRelation(uint64_t size, uint64_t num_columns) {
         auto sum = 0;
         for (unsigned i = 0; i < size; ++i) {
             sum += columns[j][i];
-            if (columns[j][i] > max) {
-                max = columns[j][i];
-            }
-            if (columns[j][i] < min) {
-                min = columns[j][i];
-            }
+//            if (columns[j][i] > max) {
+//                max = columns[j][i];
+//            }
+//            if (columns[j][i] < min) {
+//                min = columns[j][i];
+//            }
         }
         zone_map_sum.push_back(sum);
-        zone_map_max.push_back(max);
-        zone_map_min.push_back(min);
+//        zone_map_max.push_back(max);
+//        zone_map_min.push_back(min);
     }
 
-    return Relation(size, move(columns), move(zone_map_sum),move(zone_map_max),move(zone_map_min));
+    return Relation(size, move(columns), move(zone_map_sum));
 }
 
 // Store a relation in all formats
